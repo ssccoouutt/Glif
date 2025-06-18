@@ -107,7 +107,7 @@ def get_drive_service():
         return None
 
 def list_course_folders(query=None):
-    """List all course folders matching query"""
+    """List all course folders matching query in alphabetical order"""
     try:
         service = get_drive_service()
         if not service:
@@ -126,7 +126,8 @@ def list_course_folders(query=None):
                     q=q,
                     spaces='drive',
                     fields='nextPageToken, files(id, name)',
-                    pageToken=page_token
+                    pageToken=page_token,
+                    orderBy='name'  # Alphabetical ordering
                 ).execute()
                 
                 folders.extend(response.get('files', []))
@@ -400,7 +401,7 @@ def send_quality_options(sender, url):
     send_whatsapp_message(options_text)
 
 def send_course_options(sender, query=None):
-    """Send course folder options to user"""
+    """Send alphabetically sorted course folder options to user"""
     send_whatsapp_message("🔍 Searching for courses...")
     
     folders = list_course_folders(query)
@@ -408,16 +409,21 @@ def send_course_options(sender, query=None):
         send_whatsapp_message("❌ No matching courses found.")
         return
     
+    # Store folders in user session
     user_sessions[sender] = {
         'folders': folders,
         'awaiting_course_selection': True
     }
     
-    options_text = "📚 Available Courses:\n\n"
+    # Build options message with alphabetical order
+    options_text = "📚 Available Courses (A-Z):\n\n"
     option_number = 1
     option_map = {}
     
-    for folder in folders:
+    # Sort folders alphabetically by name
+    sorted_folders = sorted(folders, key=lambda x: x['name'].lower())
+    
+    for folder in sorted_folders:
         options_text += f"{option_number}. {folder['name']}\n"
         option_map[str(option_number)] = folder['id']
         option_number += 1
