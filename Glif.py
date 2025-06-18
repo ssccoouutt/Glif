@@ -21,7 +21,12 @@ GREEN_API = {
     "mediaUrl": "https://7105.media.greenapi.com"
 }
 AUTHORIZED_NUMBER = "923401809397"
-COOKIES_FILE = "cookies.txt"
+
+# Cookie configuration
+IG_COOKIES_FILE = "igcookies.txt"
+IG_COOKIES_DRIVE_URL = "https://drive.google.com/uc?export=download&id=13kNOfYmC8kZEE9Le786ndnZbdPpGBtEX"
+YT_COOKIES_FILE = "cookies.txt"
+YT_COOKIES_DRIVE_URL = "https://drive.google.com/uc?export=download&id=13iX8xpx47W3PAedGyhGpF5CxZRFz4uaF"
 
 # GLIF Configuration
 GLIF_ID = "cm0zceq2a00023f114o6hti7w"
@@ -46,6 +51,46 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+# ======================
+# COOKIE DOWNLOAD FUNCTIONS
+# ======================
+def download_cookies_file(url, filename):
+    """Download cookies file from Google Drive"""
+    try:
+        logger.info(f"Downloading cookies file: {filename}")
+        
+        # Create a session to handle potential large file warnings
+        session = requests.Session()
+        response = session.get(url, stream=True)
+        response.raise_for_status()
+        
+        # Handle Google Drive virus scan warning
+        content = response.content
+        if b'Google Drive - Virus scan warning' in content:
+            confirm = re.search(r'confirm=([^&]+)', response.url)
+            if confirm:
+                new_url = f"{url}&confirm={confirm.group(1)}"
+                response = session.get(new_url, stream=True)
+                response.raise_for_status()
+                content = response.content
+        
+        # Save the file
+        with open(filename, 'wb') as f:
+            f.write(content)
+            
+        logger.info(f"Successfully downloaded cookies file: {filename}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to download cookies file: {str(e)}")
+        return False
+
+def ensure_cookies_files():
+    """Ensure both cookies files exist, download if missing"""
+    if not os.path.exists(IG_COOKIES_FILE):
+        download_cookies_file(IG_COOKIES_DRIVE_URL, IG_COOKIES_FILE)
+    if not os.path.exists(YT_COOKIES_FILE):
+        download_cookies_file(YT_COOKIES_DRIVE_URL, YT_COOKIES_FILE)
 
 # ======================
 # CORE FUNCTIONS
@@ -130,8 +175,20 @@ def is_youtube_url(url):
     """Check if URL is from YouTube"""
     return 'youtube.com' in url or 'youtu.be' in url
 
+def is_instagram_url(url):
+    """Check if URL is from Instagram"""
+    return 'instagram.com' in url or 'instagr.am' in url
+
+def get_cookies_for_url(url):
+    """Determine which cookies file to use based on URL"""
+    if is_youtube_url(url):
+        return YT_COOKIES_FILE if os.path.exists(YT_COOKIES_FILE) else None
+    elif is_instagram_url(url):
+        return IG_COOKIES_FILE if os.path.exists(IG_COOKIES_FILE) else None
+    return None
+
 def get_available_qualities(url):
-    """Check available qualities for YouTube videos"""
+    """Check available qualities for videos"""
     if is_youtube_url(url):
         return get_youtube_qualities(url)
     else:
@@ -145,7 +202,7 @@ def get_youtube_qualities(url):
             'no_warnings': True,
             'extract_flat': False,
             'force_generic_extractor': True,
-            'cookiefile': COOKIES_FILE
+            'cookiefile': YT_COOKIES_FILE if os.path.exists(YT_COOKIES_FILE) else None
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -184,7 +241,12 @@ def get_youtube_qualities(url):
 def get_other_platform_qualities(url):
     """Get quality options for non-YouTube platforms"""
     try:
-        ydl_opts = {'quiet': True}
+        cookies_file = get_cookies_for_url(url)
+        ydl_opts = {
+            'quiet': True,
+            'cookiefile': cookies_file if cookies_file else None
+        }
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             formats = info.get('formats', [])
@@ -254,7 +316,6 @@ def download_media(url, quality, format_id=None):
         
         ydl_opts = {
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-            'cookiefile': COOKIES_FILE,
             'merge_output_format': 'mp4',
             'postprocessors': [
                 {'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'},
@@ -266,6 +327,12 @@ def download_media(url, quality, format_id=None):
             'fragment_retries': 3,
             'skip_unavailable_fragments': True
         }
+        
+        # Add appropriate cookies file if available
+        cookies_file = get_cookies_for_url(url)
+        if cookies_file:
+            ydl_opts['cookiefile'] = cookies_file
+            logger.info(f"Using cookies file: {cookies_file}")
         
         if quality == 'mp3':
             ydl_opts['format'] = 'bestaudio/best'
@@ -461,6 +528,8 @@ Paste any video URL (YouTube, Instagram, TikTok, Facebook, etc.) to download
         
         # Check if message is a URL
         elif any(proto in message.lower() for proto in ['http://', 'https://']):
+            # Ensure we have cookies files before proceeding
+            ensure_cookies_files()
             send_quality_options(sender, message)
 
         return jsonify({'status': 'processed'})
@@ -478,6 +547,8 @@ def health_check():
         "status": "active",
         "authorized_number": AUTHORIZED_NUMBER,
         "instance_id": GREEN_API['idInstance'],
+        "instagram_cookies": "present" if os.path.exists(IG_COOKIES_FILE) else "missing",
+        "youtube_cookies": "present" if os.path.exists(YT_COOKIES_FILE) else "missing",
         "timestamp": datetime.now().isoformat()
     })
 
@@ -485,17 +556,16 @@ def health_check():
 # START SERVER
 # ======================
 if __name__ == '__main__':
-    # Verify cookies file exists
-    if not os.path.exists(COOKIES_FILE):
-        logger.warning(f"Cookies file not found at: {COOKIES_FILE}")
-    else:
-        logger.info(f"Using cookies file: {COOKIES_FILE}")
+    # Download cookies files if they don't exist
+    ensure_cookies_files()
     
     logger.info(f"""
     ============================================
     WhatsApp Media Bot READY
     ONLY responding to: {AUTHORIZED_NUMBER}
     GreenAPI Instance: {GREEN_API['idInstance']}
+    Instagram Cookies: {'Present' if os.path.exists(IG_COOKIES_FILE) else 'Missing'}
+    YouTube Cookies: {'Present' if os.path.exists(YT_COOKIES_FILE) else 'Missing'}
     ============================================
     """)
     serve(app, host='0.0.0.0', port=8000)
