@@ -36,7 +36,7 @@ YT_COOKIES_DRIVE_URL = "https://drive.google.com/uc?export=download&id=13iX8xpx4
 DRIVE_FOLDER_ID = "12Wunh_25s3VkXAl08jVlXNQCr2ilzVt4"
 TOKEN_FILE = "token.json"
 TOKEN_DRIVE_URL = "https://drive.google.com/uc?export=download&id=14p_O13T1GFyZncJw3pPRYTi2jF2bh9bO"
-SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+SCOPES = ['https://www.googleapis.com/auth/drive']
 
 # GLIF Configuration
 GLIF_ID = "cm0zceq2a00023f114o6hti7w"
