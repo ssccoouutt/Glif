@@ -8,6 +8,11 @@ import os
 import tempfile
 import subprocess
 import re
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
 
 app = Flask(__name__)
 
@@ -27,6 +32,12 @@ IG_COOKIES_FILE = "igcookies.txt"
 IG_COOKIES_DRIVE_URL = "https://drive.google.com/uc?export=download&id=13kNOfYmC8kZEE9Le786ndnZbdPpGBtEX"
 YT_COOKIES_FILE = "cookies.txt"
 YT_COOKIES_DRIVE_URL = "https://drive.google.com/uc?export=download&id=13iX8xpx47W3PAedGyhGpF5CxZRFz4uaF"
+
+# Google Drive Configuration
+DRIVE_FOLDER_ID = "12Wunh_25s3VkXAl08jVlXNQCr2ilzVt4"
+TOKEN_FILE = "token.json"
+TOKEN_DRIVE_URL = "https://drive.google.com/uc?export=download&id=14p_O13T1GFyZncJw3pPRYTi2jF2bh9bO"
+SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 
 # GLIF Configuration
 GLIF_ID = "cm0zceq2a00023f114o6hti7w"
@@ -53,14 +64,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ======================
-# COOKIE DOWNLOAD FUNCTIONS
+# HELPER FUNCTIONS
 # ======================
-def download_cookies_file(url, filename):
-    """Download cookies file from Google Drive"""
+def download_file(url, filename):
+    """Download file from Google Drive"""
     try:
-        logger.info(f"Downloading cookies file: {filename}")
-        
-        # Create a session to handle potential large file warnings
         session = requests.Session()
         response = session.get(url, stream=True)
         response.raise_for_status()
@@ -75,22 +83,122 @@ def download_cookies_file(url, filename):
                 response.raise_for_status()
                 content = response.content
         
-        # Save the file
         with open(filename, 'wb') as f:
             f.write(content)
-            
-        logger.info(f"Successfully downloaded cookies file: {filename}")
         return True
     except Exception as e:
-        logger.error(f"Failed to download cookies file: {str(e)}")
+        logger.error(f"Failed to download {filename}: {str(e)}")
         return False
 
-def ensure_cookies_files():
-    """Ensure both cookies files exist, download if missing"""
+def ensure_files():
+    """Ensure all required files exist"""
     if not os.path.exists(IG_COOKIES_FILE):
-        download_cookies_file(IG_COOKIES_DRIVE_URL, IG_COOKIES_FILE)
+        download_file(IG_COOKIES_DRIVE_URL, IG_COOKIES_FILE)
     if not os.path.exists(YT_COOKIES_FILE):
-        download_cookies_file(YT_COOKIES_DRIVE_URL, YT_COOKIES_FILE)
+        download_file(YT_COOKIES_DRIVE_URL, YT_COOKIES_FILE)
+    if not os.path.exists(TOKEN_FILE):
+        download_file(TOKEN_DRIVE_URL, TOKEN_FILE)
+
+def get_drive_service():
+    """Authenticate and return Google Drive service"""
+    creds = None
+    if os.path.exists(TOKEN_FILE):
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+    
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        
+        with open(TOKEN_FILE, 'w') as token:
+            token.write(creds.to_json())
+    
+    return build('drive', 'v3', credentials=creds)
+
+def list_course_folders(query=None):
+    """List all course folders matching query"""
+    try:
+        service = get_drive_service()
+        folders = []
+        page_token = None
+        
+        while True:
+            q = f"'{DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder'"
+            if query and query.lower() != 'all':
+                q += f" and name contains '{query}'"
+            
+            response = service.files().list(
+                q=q,
+                spaces='drive',
+                fields='nextPageToken, files(id, name)',
+                pageToken=page_token
+            ).execute()
+            
+            folders.extend(response.get('files', []))
+            page_token = response.get('nextPageToken', None)
+            
+            if page_token is None:
+                break
+        
+        return folders
+    except Exception as e:
+        logger.error(f"Error listing course folders: {str(e)}")
+        return []
+
+def search_youtube(query):
+    """Search YouTube and return top result"""
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'extract_flat': True,
+            'force_generic_extractor': True,
+            'cookiefile': YT_COOKIES_FILE if os.path.exists(YT_COOKIES_FILE) else None
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(f"ytsearch1:{query}", download=False)
+            if not info or 'entries' not in info or not info['entries']:
+                return None
+            
+            entry = info['entries'][0]
+            return {
+                'url': entry['url'],
+                'title': entry.get('title', 'No title'),
+                'thumbnail': entry.get('thumbnail', '')
+            }
+    except Exception as e:
+        logger.error(f"Error searching YouTube: {str(e)}")
+        return None
+
+def get_youtube_thumbnail(url):
+    """Get highest resolution thumbnail from YouTube URL"""
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'extract_flat': True,
+            'force_generic_extractor': True,
+            'cookiefile': YT_COOKIES_FILE if os.path.exists(YT_COOKIES_FILE) else None
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if not info:
+                return None
+            
+            # Try to get the highest resolution thumbnail
+            thumbnails = info.get('thumbnails', [])
+            if thumbnails:
+                # Sort by resolution (width), highest first
+                thumbnails.sort(key=lambda x: x.get('width', 0), reverse=True)
+                return thumbnails[0]['url']
+            
+            # Fallback to default thumbnail if available
+            return info.get('thumbnail', None)
+    except Exception as e:
+        logger.error(f"Error getting YouTube thumbnail: {str(e)}")
+        return None
 
 # ======================
 # CORE FUNCTIONS
@@ -134,6 +242,25 @@ def send_whatsapp_file(file_path, caption, is_video=False):
             
     except Exception as e:
         logger.error(f"File upload failed: {str(e)}")
+        return False
+
+def send_whatsapp_url(url, caption):
+    """Send URL with caption"""
+    try:
+        send_url = f"{GREEN_API['apiUrl']}/waInstance{GREEN_API['idInstance']}/sendLink/{GREEN_API['apiToken']}"
+        payload = {
+            "chatId": f"{AUTHORIZED_NUMBER}@c.us",
+            "url": url,
+            "caption": caption
+        }
+        headers = {'Content-Type': 'application/json'}
+        
+        response = requests.post(send_url, json=payload, headers=headers)
+        response.raise_for_status()
+        logger.info(f"URL sent: {url}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send URL: {str(e)}")
         return False
 
 def generate_thumbnail(prompt):
@@ -422,6 +549,38 @@ def send_quality_options(sender, url):
     
     send_whatsapp_message(options_text)
 
+def send_course_options(sender, query=None):
+    """Send course folder options to user"""
+    send_whatsapp_message("🔍 Searching for courses...")
+    
+    folders = list_course_folders(query)
+    if not folders:
+        send_whatsapp_message("❌ No matching courses found.")
+        return
+    
+    # Store folders in user session
+    user_sessions[sender] = {
+        'folders': folders,
+        'awaiting_course_selection': True
+    }
+    
+    # Build options message
+    options_text = "📚 Available Courses:\n\n"
+    option_number = 1
+    option_map = {}
+    
+    for folder in folders:
+        options_text += f"{option_number}. {folder['name']}\n"
+        option_map[str(option_number)] = folder['id']
+        option_number += 1
+    
+    options_text += "\nReply with the number of your choice"
+    
+    # Store the option mapping in user session
+    user_sessions[sender]['option_map'] = option_map
+    
+    send_whatsapp_message(options_text)
+
 # ======================
 # WEBHOOK HANDLER
 # ======================
@@ -493,19 +652,71 @@ def handle_webhook():
                 send_whatsapp_message("❌ Invalid input. Please try again.")
                 return jsonify({'status': 'processed'})
 
+        # Check if this is a course selection
+        if sender in user_sessions and user_sessions[sender].get('awaiting_course_selection'):
+            try:
+                choice = message.strip()
+                option_map = user_sessions[sender].get('option_map', {})
+                
+                if choice in option_map:
+                    folder_id = option_map[choice]
+                    folders = user_sessions[sender]['folders']
+                    folder_name = next((f['name'] for f in folders if f['id'] == folder_id), "Selected Course")
+                    del user_sessions[sender]  # Clear the session
+                    
+                    folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
+                    send_whatsapp_url(folder_url, f"📂 {folder_name}")
+                else:
+                    send_whatsapp_message("❌ Invalid choice. Please select one of the available options.")
+                    # Resend options
+                    query = user_sessions[sender].get('query', None)
+                    send_course_options(sender, query)
+                return jsonify({'status': 'processed'})
+            except Exception as e:
+                logger.error(f"Error processing course choice: {str(e)}")
+                send_whatsapp_message("❌ Invalid input. Please try again.")
+                return jsonify({'status': 'processed'})
+
         # Command handling
         if message.lower() in ['hi', 'hello', 'hey']:
             help_text = """👋 Hi! Here's what I can do:
+
+📥 Media Download:
 Paste any video URL (YouTube, Instagram, TikTok, Facebook, etc.) to download
+
+🔍 Search:
+/search [query] - Search YouTube for videos
+/thumb [YouTube URL] - Get YouTube video thumbnail
+
+📚 Courses:
+/course [query] - Search for courses
+/course all - List all available courses
+
+🎨 Thumbnails:
 /glif [prompt] - Generate custom thumbnail
+
+ℹ️ Help:
 /help - Show this message"""
             send_whatsapp_message(help_text)
         
         elif message.lower().startswith(('/help', 'help', 'info')):
             help_text = """ℹ️ Available Commands:
-Paste any video URL (YouTube, Instagram, TikTok, Facebook, etc.) to download
+
+📥 Media Download:
+Paste any video URL to download
+
+🔍 Search:
+/search [query] - Search YouTube
+/thumb [YouTube URL] - Get thumbnail
+
+📚 Courses:
+/course [query] - Find courses
+/course all - All courses
+
+🎨 Thumbnails:
 /glif [prompt] - Generate thumbnail
-/help - Show this message"""
+
+Type any command to get started"""
             send_whatsapp_message(help_text)
         
         elif message.lower().startswith('/glif '):
@@ -526,10 +737,46 @@ Paste any video URL (YouTube, Instagram, TikTok, Facebook, etc.) to download
                 else:
                     send_whatsapp_message("❌ Failed to generate. Please try different keywords.")
         
+        elif message.lower().startswith('/search '):
+            query = message[8:].strip()
+            if query:
+                send_whatsapp_message(f"🔍 Searching YouTube for: {query}")
+                result = search_youtube(query)
+                if result:
+                    send_whatsapp_url(result['url'], f"🎥 {result['title']}")
+                else:
+                    send_whatsapp_message("❌ No results found. Please try a different query.")
+        
+        elif message.lower().startswith('/thumb '):
+            url = message[7:].strip()
+            if is_youtube_url(url):
+                send_whatsapp_message("🖼️ Getting YouTube thumbnail...")
+                thumbnail_url = get_youtube_thumbnail(url)
+                if thumbnail_url:
+                    # Download the thumbnail first
+                    response = requests.get(thumbnail_url)
+                    temp_file = os.path.join(tempfile.gettempdir(), "yt_thumbnail.jpg")
+                    with open(temp_file, 'wb') as f:
+                        f.write(response.content)
+                    # Send as file with caption
+                    send_whatsapp_file(temp_file, f"🖼️ YouTube Thumbnail")
+                    os.remove(temp_file)
+                else:
+                    send_whatsapp_message("❌ Couldn't get thumbnail. Please check the URL.")
+            else:
+                send_whatsapp_message("❌ Please provide a valid YouTube URL")
+        
+        elif message.lower().startswith('/course'):
+            query = message[7:].strip()
+            if not query:
+                send_whatsapp_message("Please specify a search query or 'all' to list all courses")
+            else:
+                send_course_options(sender, query if query.lower() != 'all' else None)
+        
         # Check if message is a URL
         elif any(proto in message.lower() for proto in ['http://', 'https://']):
             # Ensure we have cookies files before proceeding
-            ensure_cookies_files()
+            ensure_files()
             send_quality_options(sender, message)
 
         return jsonify({'status': 'processed'})
@@ -549,6 +796,7 @@ def health_check():
         "instance_id": GREEN_API['idInstance'],
         "instagram_cookies": "present" if os.path.exists(IG_COOKIES_FILE) else "missing",
         "youtube_cookies": "present" if os.path.exists(YT_COOKIES_FILE) else "missing",
+        "google_token": "present" if os.path.exists(TOKEN_FILE) else "missing",
         "timestamp": datetime.now().isoformat()
     })
 
@@ -556,8 +804,8 @@ def health_check():
 # START SERVER
 # ======================
 if __name__ == '__main__':
-    # Download cookies files if they don't exist
-    ensure_cookies_files()
+    # Download required files if they don't exist
+    ensure_files()
     
     logger.info(f"""
     ============================================
@@ -566,6 +814,7 @@ if __name__ == '__main__':
     GreenAPI Instance: {GREEN_API['idInstance']}
     Instagram Cookies: {'Present' if os.path.exists(IG_COOKIES_FILE) else 'Missing'}
     YouTube Cookies: {'Present' if os.path.exists(YT_COOKIES_FILE) else 'Missing'}
+    Google Token: {'Present' if os.path.exists(TOKEN_FILE) else 'Missing'}
     ============================================
     """)
     serve(app, host='0.0.0.0', port=8000)
